@@ -1,0 +1,219 @@
+
+<!-- 统计价格信息，转换为人民币年付及月付价格 By DT27 Start -->
+<script>
+// localStorage本地存储操作函数
+function setStorage(name, value) {
+  localStorage.setItem(name, JSON.stringify(value));
+}
+
+function getStorage(name) {
+  const value = localStorage.getItem(name);
+  return value ? JSON.parse(value) : null;
+}
+
+// 提取单个价格字符串的货币符号、价格和周期
+function extractPriceInfo(priceString) {
+  // 支持价格范围、负数和周期（年、半年、月等）
+  const match = priceString.match(/价格[:\s]*(\$|\¥|港币|HKD|€|£)?([-]?\d+\.?\d*)(?:-\d+\.?\d*)?\/(\d*\.?\d*\s*(?:年|半年|季|季度|个月|月))/);
+  if (match) {
+    const currency = match[1] || ''; // 货币符号，默认为空
+    const price = parseFloat(match[2]); // 价格数字（范围取起点）
+    const period = match[3]; // 周期（如“3年”“半年”）
+    let periodInYears = 0;
+
+    // 解析周期
+    if (period.includes('年')) {
+      periodInYears = parseFloat(period) || 1; // 如“3年”→3，“年”→1
+    } else if (period.includes('半年')) {
+      periodInYears = 0.5; // 半年为0.5年
+    } else if (period.includes('季') || period.includes('季度')) {
+      periodInYears = 0.25; // 季为0.25年
+    } else if (period.includes('月')) {
+      periodInYears = (parseFloat(period) || 1) / 12; // 如“6个月”→0.5年，“月”→1/12年
+    }
+
+    return { currency, price, period, periodInYears, original: priceString };
+  }
+  return null;
+}
+
+// 从所有匹配的DOM元素获取价格
+function getPricesFromNezhaPanel() {
+  const priceElements = document.querySelectorAll('.w-28 .text-muted-foreground,.hidden .text-muted-foreground');
+  if (!priceElements.length) {
+    // console.error('未找到任何价格元素');
+    return [];
+  }
+
+  const prices = [];
+  priceElements.forEach((element, index) => {
+    const priceString = element.textContent.trim(); // 去除多余空格
+    const priceInfo = extractPriceInfo(priceString);
+    if (priceInfo) {
+      prices.push({ index, element, ...priceInfo }); // 存储元素引用以便UI更新
+    }
+  });
+  return prices;
+}
+
+// 获取汇率数据（优先从localStorage读取，每天更新一次）
+async function getExchangeRates() {
+  const cachedRates = getStorage('exchange_rates');
+  const now = new Date().getTime();
+  const oneDay = 24 * 60 * 60 * 1000; // 24小时（毫秒）
+
+  // 检查localStorage是否存在且未过期
+  if (cachedRates && cachedRates.update_at && (now - cachedRates.update_at < oneDay)) {
+    //console.log('使用localStorage缓存的汇率数据');
+    return cachedRates.rates;
+  }
+
+  // 调用API获取新汇率
+  console.log('从API获取新汇率数据');
+  const apiUrl = 'https://v2.xxapi.cn/api/allrates';
+  try {
+    const response = await fetch(apiUrl);
+    const data = await response.json();
+
+    if (data.code !== 200) {
+      throw new Error('API请求失败: ' + data.msg);
+    }
+
+    // 缓存到localStorage，设置24小时有效期
+    const ratesData = {
+      rates: data.data.rates,
+      update_at: now
+    };
+    setStorage('exchange_rates', ratesData);
+    return data.data.rates;
+  } catch (error) {
+    console.error('获取汇率失败:', error);
+    // 使用默认汇率作为后备
+    return {
+      USD: { rate: 1 },
+      CNY: { rate: 7.1768715075 },
+      CNY: { rate: 7.8138315846 },
+      EUR: { rate: 0.8587035027 },
+      GBP: { rate: 0.7408175196 }
+    };
+  }
+}
+
+// 转换价格到人民币（使用预取的汇率数据）
+function convertPriceToCNY(currency, price, rates) {
+  if (currency === '¥') {
+    return price.toFixed(2); // 人民币无需转换
+  }
+
+  const cnyRate = rates['CNY']?.rate || 7.1768715075; // 默认人民币汇率
+  let sourceRate;
+
+  // 确定源货币的汇率
+  if (currency === '€') {
+    sourceRate = rates['EUR']?.rate || 0.8587035027;
+  } else if (currency === '£') {
+    sourceRate = rates['GBP']?.rate || 7.8138315846;
+  } else if (currency === 'HKD' || currency === '港币') {
+    sourceRate = rates['HKD']?.rate || 0.7408175196;
+  } else {
+    // $ 或空默认为USD
+    sourceRate = rates['USD']?.rate || 1;
+  }
+
+  // 转换为人民币
+  const priceInCNY = (price / sourceRate) * cnyRate;
+  return priceInCNY.toFixed(2); // 保留两位小数
+}
+
+// 主函数：处理所有价格并转换为人民币、年付、月付
+async function processNezhaPrices() {
+  // 提前获取汇率数据
+  const rates = await getExchangeRates();
+
+  const priceInfos = getPricesFromNezhaPanel();
+  if (!priceInfos.length) {
+    console.error('没有可处理的价格信息');
+    return;
+  }
+
+  const results = await Promise.all(priceInfos.map(async (priceInfo) => {
+    // console.log(`处理第${priceInfo.index + 1}个元素: ${priceInfo.original}`);
+    // console.log('货币符号:', priceInfo.currency);
+    // console.log('原始价格:', priceInfo.price);
+    // console.log('付款周期:', priceInfo.period);
+
+    // 计算年付和月付价格（原始货币）
+    const yearlyPrice = priceInfo.price / priceInfo.periodInYears;
+    const monthlyPrice = priceInfo.price / (priceInfo.periodInYears * 12);
+
+    // 转换为人民币
+    const priceInCNY = convertPriceToCNY(priceInfo.currency, priceInfo.price, rates);
+    const yearlyPriceInCNY = convertPriceToCNY(priceInfo.currency, yearlyPrice, rates);
+    const monthlyPriceInCNY = convertPriceToCNY(priceInfo.currency, monthlyPrice, rates);
+
+    if (priceInCNY && yearlyPriceInCNY && monthlyPriceInCNY) {
+      // UI更新：显示人民币年付、月付价格
+      const existingSpan = priceInfo.element.nextElementSibling;
+      if (!existingSpan || !existingSpan.classList.contains('cny-price')) {
+        priceInfo.element.insertAdjacentHTML(
+          'afterend',
+          `<span class="cny-price text-[10px] text-muted-foreground">年付:￥${yearlyPriceInCNY}<br>月付:￥${monthlyPriceInCNY}</span>`
+        );
+      }
+      // console.log('人民币价格:', priceInCNY, 'CNY');
+      // console.log('年付价格:', yearlyPrice.toFixed(2), priceInfo.currency, `(${yearlyPriceInCNY} CNY)`);
+      // console.log('月付价格:', monthlyPrice.toFixed(2), priceInfo.currency, `(${monthlyPriceInCNY} CNY)`);
+      return {
+        index: priceInfo.index,
+        original: priceInfo.original,
+        currency: priceInfo.currency,
+        price: priceInfo.price,
+        period: priceInfo.period,
+        priceInCNY,
+        yearlyPrice: yearlyPrice.toFixed(2),
+        yearlyPriceInCNY,
+        monthlyPrice: monthlyPrice.toFixed(2),
+        monthlyPriceInCNY
+      };
+    } else {
+      console.log('无法转换为人民币');
+      return null;
+    }
+  }));
+
+  // 过滤无效结果并输出
+  const validResults = results.filter(result => result !== null);
+  // console.log('所有价格转换结果:', validResults);
+  return validResults;
+}
+
+// 执行
+// 重试机制：等待React页面元素渲染完成
+async function tryProcessNezhaPrices(retries = 5, delay = 1000) {
+  for (let i = 0; i < retries; i++) {
+    const priceInfos = getPricesFromNezhaPanel();
+    if (priceInfos.length) {
+      // console.log(`找到${priceInfos.length}个价格元素，开始处理`);
+      await processNezhaPrices();
+      return;
+    }
+    // console.log(`第${i + 1}次尝试未找到价格元素，等待${delay}ms后重试`);
+    await new Promise(resolve => setTimeout(resolve, delay));
+  }
+  console.error('多次尝试后仍未找到价格元素，请检查选择器或React渲染逻辑');
+  // console.log('当前页面URL:', window.location.href);
+  // console.log('DOM状态:', document.readyState);
+}
+
+// 等待DOM加载完成或直接执行
+document.addEventListener('DOMContentLoaded', () => {
+  // console.log('DOM加载完成，开始尝试处理价格');
+  tryProcessNezhaPrices();
+});
+
+if (document.readyState === 'complete' || document.readyState === 'interactive') {
+  // console.log('DOM已加载，直接尝试处理价格');
+  tryProcessNezhaPrices();
+}
+</script>
+<!-- 统计价格信息，转换为人民币年付及月付价格 By DT27 End -->
